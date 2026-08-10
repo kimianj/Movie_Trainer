@@ -1,0 +1,19 @@
+# --- Data layer ---
+pandas
+numpy
+pyarrow
+scikit-learn
+matplotlib
+seaborn
+tqdm
+ipykernel
+jupyter
+
+# --- Modeling (added in later phase) ---
+# torch
+# torchmetrics
+
+# --- Serving (added in later phase) ---
+# fastapi
+# uvicorn
+# faiss-cpu

@@ -1,0 +1,32 @@
+{
+  "n_users": 162541,
+  "n_movies": 59047,
+  "n_ratings": 25000095,
+  "matrix_density_pct": 0.2605,
+  "rating_mean": 3.534,
+  "rating_std": 1.061,
+  "ratings_per_user": {
+    "min": 20,
+    "median": 71,
+    "mean": 153.8,
+    "p95": 554,
+    "max": 32202
+  },
+  "ratings_per_movie": {
+    "min": 1,
+    "median": 6,
+    "mean": 423.4,
+    "p95": 1503,
+    "max": 81491
+  },
+  "top_10pct_movies_share_of_ratings_pct": 94.0,
+  "busiest_days": {
+    "2000-11-20": 78444,
+    "2005-03-22": 68531,
+    "1999-12-11": 57769,
+    "2008-10-29": 47934,
+    "2000-11-21": 47381
+  },
+  "median_ratings_per_day": 2420,
+  "cold_start_movies_first_rated_after_2016-06-25_pct": 100.0
+}

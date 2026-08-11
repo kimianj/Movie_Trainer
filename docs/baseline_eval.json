@@ -1,0 +1,15 @@
+{
+  "metrics": {
+    "k": 10,
+    "n_users_evaluated": 5217,
+    "n_users_skipped_no_relevant_items": 78,
+    "recall_at_k": 0.0322,
+    "ndcg_at_k": 0.1523
+  },
+  "coverage": {
+    "val_users_total": 18003,
+    "val_users_warm_pct": 29.4,
+    "candidate_movies": 13980,
+    "candidate_movies_excluded_long_tail": 20481
+  }
+}

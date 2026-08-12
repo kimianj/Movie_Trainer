@@ -1,6 +1,9 @@
 """Exploratory analysis on the cleaned dataset: sparsity, rating distribution,
 popularity long-tail, and the timeline density behind the cold-start numbers
 from the split report.
+
+Usage:
+    python -m src.data.eda
 """
 
 import json
@@ -14,7 +17,6 @@ import pandas as pd
 from src.data.config import PROCESSED_DIR, ROOT_DIR
 
 FIGURES_DIR = ROOT_DIR / "docs" / "figures"
-
 
 def main() -> None:
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)

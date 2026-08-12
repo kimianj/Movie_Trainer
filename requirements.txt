@@ -8,6 +8,8 @@ seaborn
 tqdm
 ipykernel
 jupyter
+pytest
+faiss-cpu
 
 # --- Modeling (added in later phase) ---
 # torch

@@ -1,5 +1,7 @@
 # Movie Recommendation System
 
+![CI](https://github.com/kimianj/Movie_Trainer/actions/workflows/ci.yml/badge.svg)
+
 A production-style movie recommendation system built end-to-end on MovieLens-25M:
 raw interaction data → cleaned/split dataset → candidate generation + ranking
 models → evaluation → a served API. Structured the way a recsys team would
@@ -28,9 +30,12 @@ feasible.
 
 - [x] Data layer: load, clean, time-based split, EDA
 - [x] Baseline model (item-item collaborative filtering)
+- [x] Matrix factorization model (SVD) + model comparison
+- [x] Offline evaluation: Recall@K, NDCG@K, catalog coverage, popularity bias
+- [x] Retrieval latency benchmark: brute-force vs FAISS (exact + approximate)
+- [x] Unit tests + CI
 - [ ] Two-tower retrieval model
 - [ ] Ranking-stage model
-- [ ] Offline evaluation (Recall@K, NDCG@K)
 - [ ] FAISS-backed serving index
 - [ ] FastAPI endpoint
 - [ ] Dockerized deployment
@@ -92,45 +97,106 @@ Run via `python -m src.data.eda` (writes `docs/eda_summary.json` and
   turning ratings into implicit positive/negative labels for the two-tower
   model.
 
-## Baseline: item-item collaborative filtering
+## Models
 
-Cosine similarity over the binary user-item interaction matrix ("people who
-watched X also watched Y") — no learned parameters, no training loop. Its job
-is to prove the split → model → eval pipeline works end-to-end and to set a
-number the two-tower model has to beat. Run via:
+Both models below share one candidate universe (13,980 movies with ≥20 train
+ratings; 20,481 long-tail movies excluded — similarity/factors learned from
+a handful of ratings are noise) and are evaluated on the same 5,217 warm val
+users (29.4% of val users — the rest have no train history, see the
+cold-start finding above), so the comparison is apples-to-apples.
+
+**Item-item collaborative filtering** (`src/models/baseline.py`) — cosine
+similarity over the binary user-item interaction matrix ("people who watched
+X also watched Y"). No learned parameters, no training loop; exists to prove
+the split → model → eval pipeline works end-to-end.
+
+**Matrix factorization** (`src/models/matrix_factorization.py`) — truncated
+SVD (k=64) over the same matrix, producing dense user/item embeddings. Still
+a shallow, classical method, but embedding-based rather than co-occurrence-
+based — the same serving pattern (embeddings → nearest-neighbor search) the
+two-tower model will use later.
 
 ```bash
 python -m src.models.baseline
+python -m src.models.matrix_factorization
+python -m src.models.compare   # runs both + a popularity baseline side by side
 ```
 
-| | |
-|---|---|
-| Candidate universe | 13,980 movies (≥20 train ratings; 20,481 long-tail movies excluded) |
-| Val users evaluated | 5,217 / 18,003 (29.4% — the model has no history for the rest, see cold-start finding above) |
-| Recall@10 | 0.0322 |
-| NDCG@10 | 0.1523 |
+| model | Recall@10 | NDCG@10 | Catalog coverage | Popularity bias* |
+|---|---|---|---|---|
+| popularity (always top-10 most-rated) | 0.0131 | 0.0495 | 0.1% | 100% |
+| item-item CF | 0.0322 | 0.1523 | 4.7% | 99.7% |
+| **matrix factorization (SVD, k=64)** | **0.0453** | **0.1859** | **10.5%** | 98.4% |
 
-Both coverage numbers are limitations of *this* model, not artifacts to
-paper over: it can only recommend from the pre-filtered candidate universe,
-and it can only be evaluated on users it saw in train. The two-tower model's
-job is to close both gaps — full catalog coverage via content features, and
-warm-start-independent scoring for new users via richer signals.
+\* share of recommended slots that are a top-decile-popularity movie — lower is more personalized, not just popular.
 
-Qualitative sanity check (nearest neighbors to *Toy Story (1995)*): Star Wars
-IV, Independence Day, Forrest Gump, Back to the Future, Star Wars VI,
-Jurassic Park, Mission: Impossible, The Matrix, Toy Story 2, Star Wars V —
-all mainstream 90s titles plus its own sequel, which is the expected shape
-for a co-occurrence-based similarity.
+**What worked**: matrix factorization beats item-item CF on every accuracy
+metric and covers 2x more of the catalog. **What didn't**: all three models,
+including the two "personalized" ones, fill 98%+ of their recommendation
+slots with top-decile-popular movies — on this sparse implicit-feedback data,
+plain collaborative filtering barely escapes recommending whatever's already
+popular. This is the concrete reason the two-tower model needs
+popularity-aware negative sampling (flagged in the EDA section above), not
+just a bigger model — accuracy alone doesn't fix this, the training
+objective has to.
+
+Qualitative sanity check (item-item CF nearest neighbors to *Toy Story
+(1995)*): Star Wars IV, Independence Day, Forrest Gump, Back to the Future,
+Star Wars VI, Jurassic Park, Mission: Impossible, The Matrix, Toy Story 2,
+Star Wars V — all mainstream 90s titles plus its own sequel, the expected
+shape for a co-occurrence-based similarity.
+
+## Retrieval latency: brute-force vs FAISS
+
+The pitch for two-stage retrieval only holds if approximate nearest-neighbor
+search is actually faster where it matters — so this benchmarks brute-force
+numpy, FAISS exact search (`IndexFlatIP`), and FAISS approximate search
+(`IndexIVFFlat`, nprobe=8) over the matrix factorization's 64-dim item
+embeddings, both at the real catalog size and at synthetic sizes matched to
+a real streaming catalog (`src/models/compare.py`, since 14K movies is too
+small to ever be a bottleneck).
+
+| catalog size | brute-force | FAISS exact | FAISS approx (IVF) | IVF overlap w/ exact@10 |
+|---|---|---|---|---|
+| 13,980 (real) | 0.23 ms | 0.015 ms | 0.004 ms | 72% |
+| 100,000 (synthetic) | 0.72 ms | 0.22 ms | 0.018 ms | 23% |
+| 1,000,000 (synthetic) | 13.9 ms | 3.6 ms | 0.058 ms | 17% |
+
+**What worked**: at 1M items, FAISS IVF is ~240x faster than brute force
+(0.058ms vs 13.9ms per query) — this is where two-stage retrieval actually
+earns its keep. **What didn't**: at the real 14K-movie catalog, brute force
+is already sub-millisecond, so approximate search buys latency nobody needs
+yet. And the IVF overlap-with-exact column is the trade-off usually left out
+of "FAISS is faster" claims — at default settings (nlist=√N, nprobe=8), the
+approximate index only agrees with the exact top-10 17-23% of the time at
+scale. That's too lossy to ship as-is; a real deployment would need to tune
+nprobe upward (fewer, more thorough cluster probes) or switch to HNSW, and
+re-measure this same latency/overlap curve before trusting it.
+
+## Testing & CI
+
+22 unit tests (`tests/`) cover the parts of the pipeline that are easy to
+get subtly wrong and hard to notice from the metrics alone: dedup/cleaning
+edge cases, that the time-based split doesn't leak future rows into train,
+that cold-start detection is counted correctly, and the ranking metrics
+against hand-computed examples. Runs on every push to `main` via GitHub
+Actions (`.github/workflows/ci.yml`).
+
+```bash
+python -m pytest tests/ -v
+```
 
 ## Repo layout
 
 ```text
 src/data/       loading, cleaning, time-split, EDA
-src/models/     item-item CF baseline (done); two-tower model (WIP)
-src/eval/       ranking metrics (Recall@K, NDCG@K)
+src/models/     item-item CF + matrix factorization baselines (done); two-tower model (WIP)
+src/eval/       ranking metrics (Recall@K, NDCG@K) + diversity metrics (coverage, popularity bias)
 api/            FastAPI serving layer (WIP)
+tests/          unit tests for src/data and src/eval
+.github/        CI workflow
 notebooks/      exploratory notebooks only — no pipeline logic lives here
-docs/           design notes, EDA figures/summary
+docs/           design notes, EDA figures/summary, model comparison + latency results
 Data/           raw + processed data (gitignored)
 ```
 
@@ -142,5 +208,6 @@ python -m venv .venv
 pip install -r requirements.txt
 python -m src.data.build_dataset   # builds Data/processed/{train,val,test}.parquet
 python -m src.data.eda             # writes docs/eda_summary.json + figures
-python -m src.models.baseline      # trains + evaluates the item-item CF baseline
+python -m src.models.compare       # trains + evaluates all models, benchmarks FAISS latency
+python -m pytest tests/ -v         # runs the unit test suite
 ```

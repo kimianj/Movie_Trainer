@@ -1,0 +1,68 @@
+{
+  "models": [
+    {
+      "model": "popularity",
+      "k": 10,
+      "n_users_evaluated": 5217,
+      "n_users_skipped_no_relevant_items": 78,
+      "recall_at_k": 0.0131,
+      "ndcg_at_k": 0.0495,
+      "catalog_coverage": 0.0007,
+      "popularity_bias_top_decile_share": 1.0
+    },
+    {
+      "model": "item_item_cf",
+      "k": 10,
+      "n_users_evaluated": 5217,
+      "n_users_skipped_no_relevant_items": 78,
+      "recall_at_k": 0.0322,
+      "ndcg_at_k": 0.1523,
+      "catalog_coverage": 0.0469,
+      "popularity_bias_top_decile_share": 0.9968
+    },
+    {
+      "model": "matrix_factorization",
+      "k": 10,
+      "n_users_evaluated": 5217,
+      "n_users_skipped_no_relevant_items": 78,
+      "recall_at_k": 0.0453,
+      "ndcg_at_k": 0.1859,
+      "catalog_coverage": 0.1052,
+      "popularity_bias_top_decile_share": 0.9842
+    }
+  ],
+  "latency": {
+    "real_scale": {
+      "n_items": 13980,
+      "dim": 64,
+      "numpy_brute_force_ms_per_query": 0.2292,
+      "faiss_flat_exact_ms_per_query": 0.0152,
+      "faiss_ivf_approx_ms_per_query": 0.0038,
+      "faiss_ivf_nlist": 118,
+      "faiss_ivf_nprobe": 8,
+      "faiss_ivf_overlap_with_exact_at_k": 0.7198
+    },
+    "synthetic_scale": [
+      {
+        "n_items": 100000,
+        "dim": 64,
+        "numpy_brute_force_ms_per_query": 0.7172,
+        "faiss_flat_exact_ms_per_query": 0.2209,
+        "faiss_ivf_approx_ms_per_query": 0.018,
+        "faiss_ivf_nlist": 316,
+        "faiss_ivf_nprobe": 8,
+        "faiss_ivf_overlap_with_exact_at_k": 0.234
+      },
+      {
+        "n_items": 1000000,
+        "dim": 64,
+        "numpy_brute_force_ms_per_query": 13.9278,
+        "faiss_flat_exact_ms_per_query": 3.5913,
+        "faiss_ivf_approx_ms_per_query": 0.0578,
+        "faiss_ivf_nlist": 1000,
+        "faiss_ivf_nprobe": 8,
+        "faiss_ivf_overlap_with_exact_at_k": 0.171
+      }
+    ]
+  }
+}

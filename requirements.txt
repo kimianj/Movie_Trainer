@@ -11,9 +11,8 @@ jupyter
 pytest
 faiss-cpu
 
-# --- Modeling (added in later phase) ---
-# torch
-# torchmetrics
+# --- Modeling ---
+torch
 
 # --- Serving (added in later phase) ---
 # fastapi

@@ -34,7 +34,7 @@ feasible.
 - [x] Offline evaluation: Recall@K, NDCG@K, catalog coverage, popularity bias
 - [x] Retrieval latency benchmark: brute-force vs FAISS (exact + approximate)
 - [x] Unit tests + CI
-- [ ] Two-tower retrieval model
+- [x] Two-tower retrieval model (implemented; training/eval in progress)
 - [ ] Ranking-stage model
 - [ ] FAISS-backed serving index
 - [ ] FastAPI endpoint
@@ -145,6 +145,29 @@ Qualitative sanity check (item-item CF nearest neighbors to *Toy Story
 Star Wars VI, Jurassic Park, Mission: Impossible, The Matrix, Toy Story 2,
 Star Wars V — all mainstream 90s titles plus its own sequel, the expected
 shape for a co-occurrence-based similarity.
+
+**Two-tower retrieval model** (`src/models/two_tower.py`) — a user tower
+(ID embedding only; MovieLens has no user side-info) and an item tower (ID
+embedding + genre + tag-genome content features), trained with in-batch
+sampled softmax and a log-Q popularity correction so the model isn't just
+rewarded for recommending whatever's already popular — the concrete failure
+mode the baseline/MF comparison above found. Directly targets the two
+findings from EDA: index 0 is reserved as UNK in both towers, and each
+example's ID is randomly zeroed out to UNK during training (`ID_DROPOUT_PROB
+= 0.15`) so the UNK row actually receives gradient and the item tower is
+forced to sometimes rely on content features alone — without this, cold-start
+scoring at serving time would hit a never-trained embedding row. Evaluated
+on the full catalog (not just the ≥20-ratings subset the baseline/MF use)
+plus a cold-start-only slice (val movies never seen in train, where
+baseline/MF structurally score 0% by construction) to directly test whether
+the content features work.
+
+```bash
+python -m src.models.two_tower
+```
+
+Training/evaluation is in progress — results (`docs/two_tower_eval.json`)
+to follow once the run completes.
 
 ## Retrieval latency: brute-force vs FAISS
 

@@ -239,6 +239,50 @@ def train_two_tower(train: pd.DataFrame, features: dict):
     return user_tower, item_tower, user_to_idx, item_to_idx
 
 
+def load_checkpoint(checkpoint_path=CHECKPOINT_PATH, features: dict | None = None):
+    """Inverse of the torch.save() at the end of train_two_tower(): rebuilds
+    both towers from a saved checkpoint without retraining. Nothing else in
+    the codebase reads this checkpoint back -- ranking/serving code needs a
+    trained model without paying the ~27 min training cost again.
+    """
+    # weights_only=False: the checkpoint bundles user_ids/item_ids as numpy
+    # arrays alongside the tensors, and we only ever load checkpoints this
+    # codebase wrote itself, so there's no untrusted-source risk here.
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    user_ids, item_ids = checkpoint["user_ids"], checkpoint["item_ids"]
+    # same convention as build_vocab(): index 0 reserved for UNK.
+    user_to_idx = {u: i + 1 for i, u in enumerate(user_ids)}
+    item_to_idx = {m: i + 1 for i, m in enumerate(item_ids)}
+
+    if features is None:
+        features = load_catalog_features()
+
+    user_tower = UserTower(len(user_ids))
+    item_tower = ItemTower(len(item_ids), features["genre_dim"], features["genome_dim"])
+    user_tower.load_state_dict(checkpoint["user_tower"])
+    item_tower.load_state_dict(checkpoint["item_tower"])
+    user_tower.eval()
+    item_tower.eval()
+    return user_tower, item_tower, user_to_idx, item_to_idx, features
+
+
+def load_user_tower(checkpoint_path=CHECKPOINT_PATH):
+    """Loads just the user tower + user_to_idx from a checkpoint, skipping
+    the item tower entirely. Serving only needs to embed a user at request
+    time -- item embeddings are precomputed into a FAISS index ahead of time
+    (src/serving/build_index.py) -- so this avoids reconstructing ItemTower
+    and, with it, ever touching the 59MB genome feature files at serving
+    time; only the small checkpoint file is read.
+    """
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    user_ids = checkpoint["user_ids"]
+    user_to_idx = {u: i + 1 for i, u in enumerate(user_ids)}
+    user_tower = UserTower(len(user_ids))
+    user_tower.load_state_dict(checkpoint["user_tower"])
+    user_tower.eval()
+    return user_tower, user_to_idx
+
+
 # --------------------------------------------------------------------------
 # Inference: precompute embeddings for every train user and every catalog
 # item (using each item's real ID if seen in train, UNK otherwise), then
@@ -275,7 +319,9 @@ class TwoTowerRecommender:
             shape=(len(self.user_ids_), len(self.catalog_movie_ids)),
         )
 
-    def recommend_batch(self, user_ids: list, k: int, batch_size: int = 1000) -> dict:
+    def _top_k(self, user_ids: list, k: int, batch_size: int = 1000) -> dict:
+        """Shared by recommend_batch (ids only) and recommend_batch_with_scores
+        (ids + raw dot-product score, needed as a ranking-stage feature)."""
         known = [u for u in user_ids if u in self.user_to_idx_]
         recs = {}
         for start in range(0, len(known), batch_size):
@@ -290,9 +336,20 @@ class TwoTowerRecommender:
                 order = np.argsort(-row_scores)
                 ranked_idx = top_k_idx[row][order]
                 recs[user_id] = [
-                    self.catalog_movie_ids[i] for i in ranked_idx if scores[row, i] > -np.inf
+                    (self.catalog_movie_ids[i], float(scores[row, i]))
+                    for i in ranked_idx
+                    if scores[row, i] > -np.inf
                 ]
         return recs
+
+    def recommend_batch(self, user_ids: list, k: int, batch_size: int = 1000) -> dict:
+        return {
+            user_id: [movie_id for movie_id, _ in ranked]
+            for user_id, ranked in self._top_k(user_ids, k, batch_size).items()
+        }
+
+    def recommend_batch_with_scores(self, user_ids: list, k: int, batch_size: int = 1000) -> dict:
+        return self._top_k(user_ids, k, batch_size)
 
 
 def main() -> None:

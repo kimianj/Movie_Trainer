@@ -10,11 +10,12 @@ ipykernel
 jupyter
 pytest
 faiss-cpu
+joblib
 
 # --- Modeling ---
 torch
 
-# --- Serving (added in later phase) ---
-# fastapi
-# uvicorn
-# faiss-cpu
+# --- Serving ---
+fastapi
+uvicorn[standard]
+httpx

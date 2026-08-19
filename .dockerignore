@@ -1,0 +1,28 @@
+.venv/
+.git/
+.github/
+.pytest_cache/
+.qodo/
+__pycache__/
+**/__pycache__/
+*.pyc
+.ipynb_checkpoints/
+notebooks/
+docs/
+tests/
+movie_main.ipynb
+README.md
+
+# Raw + training-only processed data: not needed at serving time, and the
+# raw catalog alone is several hundred MB. Everything else under
+# Data/processed/ (checkpoint, movies.parquet, ranker_model.joblib,
+# serving/*) is still copied -- these are exact-path excludes, not a
+# directory-wide one.
+Data/ml-25m/
+Data/processed/train.parquet
+Data/processed/val.parquet
+Data/processed/test.parquet
+Data/processed/split_report.json
+Data/processed/item_genome_features.npy
+Data/processed/item_genome_movie_ids.npy
+Data/processed/item_genre_features.parquet

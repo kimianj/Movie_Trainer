@@ -3,6 +3,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[2]
 RAW_DIR = ROOT_DIR / "Data" / "ml-25m"
 PROCESSED_DIR = ROOT_DIR / "Data" / "processed"
+SERVING_DIR = PROCESSED_DIR / "serving"
 
 RATINGS_PATH = RAW_DIR / "ratings.csv"
 MOVIES_PATH = RAW_DIR / "movies.csv"

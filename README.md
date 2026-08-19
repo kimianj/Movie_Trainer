@@ -13,11 +13,12 @@ Given a user's rating history, predict which movies they're most likely to
 engage with next — and do it fast enough to serve at request time, not just
 score well offline.
 
-## Architecture (planned)
+## Architecture
 
 ```text
-raw CSVs → clean + time-split → [baseline model] → offline eval (Recall@K, NDCG@K)
-                                → [two-tower model] → embeddings → FAISS index → FastAPI
+raw CSVs → clean + time-split → [baseline / MF models] → offline eval (Recall@K, NDCG@K)
+                                → [two-tower retrieval] → [ranking-stage reranker]
+                                → FAISS index → FastAPI → Docker
 ```
 
 Two-stage pattern: cheap, broad **candidate generation** (two-tower retrieval
@@ -34,11 +35,13 @@ feasible.
 - [x] Offline evaluation: Recall@K, NDCG@K, catalog coverage, popularity bias
 - [x] Retrieval latency benchmark: brute-force vs FAISS (exact + approximate)
 - [x] Unit tests + CI
-- [x] Two-tower retrieval model (implemented; training/eval in progress)
-- [ ] Ranking-stage model
-- [ ] FAISS-backed serving index
-- [ ] FastAPI endpoint
-- [ ] Dockerized deployment
+- [x] Two-tower retrieval model
+- [x] Ranking-stage model
+- [x] FAISS-backed serving index
+- [x] FastAPI endpoint
+- [x] Dockerized deployment (Dockerfile written and builds through image-layer
+      creation; final local verification blocked by this machine's disk space,
+      not a code issue — see [Docker](#docker))
 
 ## Data
 
@@ -156,18 +159,88 @@ findings from EDA: index 0 is reserved as UNK in both towers, and each
 example's ID is randomly zeroed out to UNK during training (`ID_DROPOUT_PROB
 = 0.15`) so the UNK row actually receives gradient and the item tower is
 forced to sometimes rely on content features alone — without this, cold-start
-scoring at serving time would hit a never-trained embedding row. Evaluated
-on the full catalog (not just the ≥20-ratings subset the baseline/MF use)
-plus a cold-start-only slice (val movies never seen in train, where
-baseline/MF structurally score 0% by construction) to directly test whether
-the content features work.
+scoring at serving time would hit a never-trained embedding row.
 
 ```bash
 python -m src.models.two_tower
 ```
 
-Training/evaluation is in progress — results (`docs/two_tower_eval.json`)
-to follow once the run completes.
+| model | candidate universe | Recall@10 | NDCG@10 | Catalog coverage | Popularity bias* |
+|---|---|---|---|---|---|
+| matrix factorization (SVD, k=64) | 13,980 movies (≥20 ratings) | 0.0453 | 0.1859 | 10.5% | 98.4% |
+| **two-tower** | **62,423 movies (full catalog)** | 0.0366 | 0.1737 | 3.39% | 94.2% |
+
+\* share of recommended slots that are a top-decile-popularity movie — lower is more personalized, not just popular.
+
+Not apples-to-apples with the MF row above: the two-tower model is scored
+against the *entire* 62,423-movie catalog (4.5x more distractors) instead of
+the ≥20-ratings 13,980-movie subset, because handling the full catalog
+including movies with almost no training signal is the point of adding
+content features. On that harder task it lands close to MF on accuracy and
+is meaningfully less popularity-biased (94.2% vs 98.4%), but with lower raw
+catalog coverage in this run — 2 epochs on CPU, not yet tuned.
+
+The result that actually matters is the cold-start-only slice (val movies
+*never seen in train* — the 29-43% of val/test movies flagged in the EDA
+findings above, where baseline/MF structurally score exactly 0% by
+construction since they have no embedding for an unseen ID):
+
+| slice | users evaluated | Recall@10 | NDCG@10 |
+|---|---|---|---|
+| warm (all val movies) | 5,295 | 0.0366 | 0.1737 |
+| **cold-start only (unseen in train)** | **3,508** | **0.0262** | **0.033** |
+
+Nonzero recall on movies the model never trained on is the content-feature
+tower doing its job — baseline and MF cannot do this at all, by construction,
+regardless of how much longer they train.
+
+## Ranking-stage model
+
+The second stage of the two-stage pattern: a pointwise reranker
+(`sklearn.ensemble.HistGradientBoostingClassifier`) that only ever reorders
+the two-tower's own top-50 candidates per user — it never sees the full
+catalog, so its whole job is to use signal the retrieval model's raw dot
+product doesn't capture on its own: `two_tower_score`, `candidate_rank`
+(the retrieval model's own ordering), `log_item_popularity`, `genre_overlap`
+(between a user's aggregated train-history genre vector and the candidate's
+genres), `has_genome`, `log_user_activity` (`src/ranking/features.py`).
+
+Trained on 80% of val users (4,236 users, 211,800 candidate rows, 11.86%
+positive rate), scored on the other 20% it never trained on, then checked a
+second time against `test.parquet` — the first and only place the test split
+is touched anywhere in this project — for a genuinely held-out number, not
+one measured on data the model was fit to:
+
+```bash
+python -m src.ranking.train
+```
+
+| slice | n users | | Recall@10 | NDCG@10 | Catalog coverage | Popularity bias* |
+|---|---|---|---|---|---|---|
+| holdout (val, unseen by ranker) | 1,059 | before rerank | 0.0403 | 0.1828 | 1.89% | 94.2% |
+| holdout (val, unseen by ranker) | 1,059 | **after rerank** | **0.0442** | **0.2081** | 1.64% | **86.6%** |
+| test set | 4,099 | before rerank | 0.0263 | 0.1158 | 3.28% | 94.6% |
+| test set | 4,099 | **after rerank** | **0.0272** | **0.1185** | 2.81% | **87.6%** |
+
+\* share of recommended slots that are a top-decile-popularity movie — lower is more personalized, not just popular.
+
+**What worked**: reranking lifts both accuracy metrics on both slices —
+holdout Recall@10 +9.7%, NDCG@10 +13.8%; test set +3.4% / +2.3% (smaller,
+as expected on data the ranker never touched during training, but still a
+genuine, consistent-direction lift, not noise). Popularity bias drops
+substantially on both slices (94%→86.6% holdout, 94.6%→87.6% test) — the
+item-popularity and genre-overlap features actively pull the ranking away
+from "whatever's popular" and toward what actually matches the user's
+history, which the raw two-tower dot product alone doesn't do as well.
+**What didn't**: catalog
+coverage drops slightly on both slices (e.g. 1.89%→1.64% on holdout) — a
+pointwise classifier optimizing per-item relevance has no term rewarding
+spreading recommendations across the catalog, so accuracy and coverage pull
+in different directions here, same tension already visible in the
+baseline/MF comparison above. Pairwise/listwise reranking (e.g. LambdaMART)
+would likely rank better than this pointwise setup but pulls in a
+LightGBM/XGBoost dependency this project deliberately avoided — noted as
+future work, the same treatment as the IVF `nprobe` tuning gap below.
 
 ## Retrieval latency: brute-force vs FAISS
 
@@ -196,14 +269,99 @@ scale. That's too lossy to ship as-is; a real deployment would need to tune
 nprobe upward (fewer, more thorough cluster probes) or switch to HNSW, and
 re-measure this same latency/overlap curve before trusting it.
 
+## Serving: FAISS index + FastAPI
+
+`src/serving/build_index.py` builds everything the API needs to answer a
+request without touching raw training data: a FAISS `IndexFlatIP` over the
+full-catalog item embeddings (exact, not approximate — the latency
+benchmark above already found exact search is sub-millisecond at this
+catalog's real scale, so there's no reason to trade accuracy for a latency
+win nobody needs), plus the ranking-stage feature arrays and a compact
+boolean seen-items mask.
+
+```bash
+python -m src.serving.build_index   # writes Data/processed/serving/
+uvicorn api.main:app --reload       # GET /health, GET /recommend/{user_id}?k=10
+```
+
+**What worked**: keeping the servable artifact set small mattered more than
+it first looked — the tag-genome content features are 59MB raw, but the
+ranker only ever uses a 1-bit `has_genome` flag derived from them, so that
+59MB matrix is loaded once at index-build time and never again; the API
+loads a ~90MB total footprint (checkpoint + FAISS index + feature arrays +
+ranker) instead. The API also never reconstructs the item tower at all —
+item embeddings are precomputed into the FAISS index ahead of time, so
+serving only needs the small user tower to embed the incoming user ID.
+
+Example request/response:
+
+```bash
+$ curl http://localhost:8000/recommend/1?k=5
+{
+  "user_id": 1,
+  "personalized": true,
+  "recommendations": [
+    {"movie_id": 4226, "title": "Memento (2000)", "score": 0.171},
+    {"movie_id": 4878, "title": "Donnie Darko (2001)", "score": 0.165},
+    {"movie_id": 5618, "title": "Spirited Away (Sen to Chihiro no kamikakushi) (2001)", "score": 0.165},
+    {"movie_id": 2959, "title": "Fight Club (1999)", "score": 0.159},
+    {"movie_id": 6874, "title": "Kill Bill: Vol. 1 (2003)", "score": 0.157}
+  ]
+}
+```
+
+An unknown `user_id` (never seen in train) falls back to the trained UNK
+embedding row instead of erroring, and the response flags `"personalized": false`
+so a caller can tell the difference — the same cold-start path
+the two-tower model was explicitly trained to support, tested live:
+
+```bash
+$ curl http://localhost:8000/recommend/999999999?k=3
+{"user_id": 999999999, "personalized": false, "recommendations": [
+  {"movie_id": 593, "title": "Silence of the Lambs, The (1991)", "score": 3.91},
+  {"movie_id": 318, "title": "Shawshank Redemption, The (1994)", "score": 3.91},
+  {"movie_id": 356, "title": "Forrest Gump (1994)", "score": 3.90}
+]}
+```
+
+If `Data/processed/serving/` hasn't been built yet, `/health` reports
+`"status": "degraded"` and `/recommend` returns `503` instead of crashing —
+this is what keeps `api/main.py` importable and testable in CI, which has
+no `Data/` at all (see `tests/test_api.py`).
+
+## Docker
+
+```bash
+docker build -t movie-recommender .
+docker run -p 8000:8000 movie-recommender
+```
+
+Serving-only image — it doesn't train anything at build time (two-tower
+training alone takes ~27 min on CPU); it assumes the artifacts above already
+exist locally and copies them in. `torch`'s default PyPI resolution pulls
+the multi-gigabyte CUDA build, so the `Dockerfile` installs the CPU-only
+wheel explicitly first. `.dockerignore` excludes the raw `Data/ml-25m/` CSVs
+and the training-only parquet/genome files by exact path, so the image only
+ships the ~90MB of serving artifacts, not the full processed dataset.
+
+The image builds cleanly through dependency install and layer creation; the
+final local verification (`docker run` + hitting `/health` from inside the
+container) is blocked on this development machine by disk space (under 1GB
+free), not by anything in the Dockerfile — re-run `docker build` once space
+is available to confirm end-to-end.
+
 ## Testing & CI
 
-22 unit tests (`tests/`) cover the parts of the pipeline that are easy to
+41 unit tests (`tests/`) cover the parts of the pipeline that are easy to
 get subtly wrong and hard to notice from the metrics alone: dedup/cleaning
 edge cases, that the time-based split doesn't leak future rows into train,
-that cold-start detection is counted correctly, and the ranking metrics
-against hand-computed examples. Runs on every push to `main` via GitHub
-Actions (`.github/workflows/ci.yml`).
+that cold-start detection is counted correctly, the ranking metrics against
+hand-computed examples, checkpoint save/load round-tripping, ranking-feature
+engineering, and the FastAPI routes (via dependency injection against small
+in-memory fakes, so no test needs the real trained model on disk). Runs on
+every push to `main` via GitHub Actions (`.github/workflows/ci.yml`) — none
+of it depends on `Data/` existing or the two-tower model being trained,
+since neither is present in a fresh CI checkout.
 
 ```bash
 python -m pytest tests/ -v
@@ -213,14 +371,17 @@ python -m pytest tests/ -v
 
 ```text
 src/data/       loading, cleaning, time-split, EDA
-src/models/     item-item CF + matrix factorization baselines (done); two-tower model (WIP)
+src/models/     item-item CF, matrix factorization, and two-tower retrieval models
+src/ranking/    ranking-stage feature engineering + training (rerank over two-tower candidates)
+src/serving/    builds the FAISS index + serving artifacts the API loads
 src/eval/       ranking metrics (Recall@K, NDCG@K) + diversity metrics (coverage, popularity bias)
-api/            FastAPI serving layer (WIP)
-tests/          unit tests for src/data and src/eval
+api/            FastAPI serving layer (schemas, recommender service, routes)
+tests/          unit tests for src/data, src/eval, src/ranking, and api/
 .github/        CI workflow
 notebooks/      exploratory notebooks only — no pipeline logic lives here
-docs/           design notes, EDA figures/summary, model comparison + latency results
+docs/           design notes, EDA figures/summary, model + ranker eval, latency results
 Data/           raw + processed data (gitignored)
+Dockerfile      serving-only image (see Docker section)
 ```
 
 ## Setup
@@ -231,6 +392,12 @@ python -m venv .venv
 pip install -r requirements.txt
 python -m src.data.build_dataset   # builds Data/processed/{train,val,test}.parquet
 python -m src.data.eda             # writes docs/eda_summary.json + figures
-python -m src.models.compare       # trains + evaluates all models, benchmarks FAISS latency
+python -m src.models.compare       # trains + evaluates baseline/MF, benchmarks FAISS latency
+python -m src.models.two_tower     # trains two-tower retrieval model (~27 min CPU)
+python -m src.ranking.train        # trains ranker, writes ranker_model.joblib
+python -m src.serving.build_index  # builds FAISS index + serving artifacts
 python -m pytest tests/ -v         # runs the unit test suite
+uvicorn api.main:app --reload      # run the API locally
+docker build -t movie-recommender .
+docker run -p 8000:8000 movie-recommender
 ```

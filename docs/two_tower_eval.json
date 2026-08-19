@@ -1,0 +1,23 @@
+{
+  "metrics": {
+    "k": 10,
+    "n_users_evaluated": 5295,
+    "n_users_skipped_no_relevant_items": 0,
+    "recall_at_k": 0.0366,
+    "ndcg_at_k": 0.1737
+  },
+  "catalog_coverage": 0.0339,
+  "popularity_bias_top_decile_share": 0.942,
+  "coverage": {
+    "val_users_total": 18003,
+    "val_users_warm_pct": 29.4,
+    "candidate_movies": 62423
+  },
+  "cold_start_only": {
+    "k": 10,
+    "n_users_evaluated": 3508,
+    "n_users_skipped_no_relevant_items": 0,
+    "recall_at_k": 0.0262,
+    "ndcg_at_k": 0.033
+  }
+}
